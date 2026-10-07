@@ -1,62 +1,197 @@
-# K-Means Hardware Accelerator
+# K-Means Clustering Hardware Accelerator
 
-Designed and verified a deeply pipelined K-means clustering accelerator, executing the complete physical design flow from RTL to GDSII using the SkyWater 130nm PDK.
+A pipelined, parameterised K-means accelerator in SystemVerilog. For every 2-D
+point it finds the nearest of K centroids **and** accumulates per-cluster sums
+and counts, so one pass over the data is a complete Lloyd iteration: the host
+only divides `sum / count`.
 
-This Domain-Specific Accelerator offloads distance calculation and cluster assignment from a host CPU. It processes 2D coordinate data points against $K=4$ centroids using a fully unrolled parallel architecture.
+Verified with a constrained-random cocotb testbench with functional coverage,
+an exhaustive datapath test, and SymbiYosys formal proofs; lint-clean under
+Verilator -Wall. Design rationale and trade-offs: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Architecture & Pipeline
-The core calculates the Squared Euclidean Distance for incoming data streams: 
-$d^2 = (x - c_x)^2 + (y - c_y)^2$
+| | |
+|---|---|
+| Throughput | 1 point per clock (initiation interval 1) |
+| Latency | 3 + log2(K) cycles (5 for K = 4) |
+| Clusters | any power of two K >= 2; verified for K = 2, 4, 8, 16 |
+| Arithmetic | signed 16-bit coordinates, exact 33-bit squared distances |
+| Interfaces | valid/ready streams in and out with full back-pressure, centroid configuration, per-cluster statistics read-back |
 
-* **Data Width:** 16-bit Fixed-Point Arithmetic (Signed 2's Complement).
-* **Throughput:** 1 Coordinate Point per clock cycle (Initiation Interval = 1).
-* **Pipeline Depth:** 5 Clock Cycles (3 cycles for Processing Elements, 2 cycles for Min-Finder).
+## Architecture
 
-The datapath consists of three primary stages:
-1. **Processing Elements (PEs):** 4 parallel multiplier-accumulator units that compute the squared distance to all 4 centroids simultaneously. Expanded internal bit-widths prevent overflow during subtraction and squaring.
-2. **Comparator Tree:** A 2-stage pipelined tournament tree to find the minimum distance and output the winning `cluster_id`.
-3. **FSM Controller:** Manages centroid loading, data valid signaling, memory stream tracking, and pipeline draining.
+```
+  s_x, s_y  (valid / ready)
+      |
+      +-------------+-------------+--- ... ---+
+      v             v             v           v
+  +--------+    +--------+    +--------+  +--------+    centroid registers
+  |  PE 0  |    |  PE 1  |    |  PE 2  |  | PE K-1 |    (written while idle)
+  +--------+    +--------+    +--------+  +--------+
+   3 stages: subtract -> square (DSP) -> add, 33-bit result
+      |             |             |           |
+      +------+------+             +-----+-----+
+             v                          v
+        [ compare ]                [ compare ]        arg-min tree,
+             +-------------+------------+             one registered level per stage,
+                           v                          ties go to the lower index
+                      [ compare ]
+                           |
+               m_cluster, m_dist (valid / ready)
+                           |
+                           v
+        per-cluster sum_x, sum_y, count  +  total SSE   (update-step statistics)
+```
 
-## ASIC Physical Design: Sky130 
-The core was pushed through the OpenROAD/OpenLane RTL-to-GDS implementation flow targeting the open-source SkyWater 130nm node. 
+The whole pipeline advances together and stalls when the output is not
+accepted. Each stage only loads when it receives a valid point.
 
-| Metric | Result |
-| :--- | :--- |
-| **Technology Node** | Sky130 (130nm) |
-| **Die Area** | 1000 µm x 1000 µm (Absolute) |
-| **Target Clock** | 100 MHz (10.0ns period) |
-| **Setup/Hold Violations** | 0 (Timing Clean) |
-| **DRC / LVS Violations** | 0 (Sign-off Clean) |
+## Host flow (one Lloyd iteration)
 
-### Final GDSII Silicon Layout
-![Silicon Layout](openlane/chip_layout.png)
-*(Layout view generated via KLayout showing power grid routing and standard cell placement)*
+1. While idle, write the K centroids: `cfg_we`, `cfg_idx`, `cfg_cx`, `cfg_cy`.
+2. Pulse `start` with `num_points`.
+3. Stream points on `s_valid/s_ready/s_x/s_y`. Accept per-point results on
+   `m_valid/m_ready/m_cluster/m_dist` (tie `m_ready` high if only the
+   statistics are needed).
+4. When `done` pulses, read `acc_sum_x`, `acc_sum_y`, `acc_count` for each
+   cluster through `acc_idx`. New centroid = sum / count; `sse` measures
+   convergence.
+5. Repeat until the centroids stop moving.
 
-## FPGA Synthesis & PPA 
-Initial synthesis and logic validation were performed targeting the Xilinx Artix-7 FPGA (`xc7a35tcpg236-1`) using Vivado.
+`tb/test_kmeans.py::test_lloyd_full_algorithm` runs exactly this loop and
+checks every iteration against a pure-software K-means.
 
-| Metric | Value |
-| :--- | :--- |
-| **Max Frequency (Fmax)** | 186.74 MHz |
-| **Throughput** | 186.74 Million Points/sec |
-| **Slice LUTs** | 379 (1.82%) |
-| **Slice Registers** | 489 (1.18%) |
-| **Dedicated DSP Slices** | 8 (8.89%) |
+## Ports
 
-## Verification 
-The RTL is fully verified using a self-checking behavioral Verilog testbench. The testbench automatically generates randomized 2D coordinate streams, computes a zero-time software golden model, drives the hardware inputs, and asserts the pipeline output against the expected results.
+| Port | Dir | Width | Description |
+|---|---|---|---|
+| `clk`, `rst_n` | in | 1 | clock, active-low asynchronous reset |
+| `cfg_we`, `cfg_idx`, `cfg_cx`, `cfg_cy` | in | 1, log2 K, 16, 16 | centroid write; ignored while busy |
+| `start`, `num_points` | in | 1, 16 | start a run of `num_points` points; ignored while busy |
+| `busy`, `done` | out | 1 | run in progress; one-cycle pulse when the last result is accepted |
+| `s_valid`, `s_ready`, `s_x`, `s_y` | in/out | 1, 1, 16, 16 | point stream |
+| `m_valid`, `m_ready`, `m_cluster`, `m_dist` | out/in | 1, 1, log2 K, 33 | result stream |
+| `acc_idx` | in | log2 K | selects the cluster for read-back |
+| `acc_sum_x`, `acc_sum_y`, `acc_count` | out | 32, 32, 16 | statistics of cluster `acc_idx`, valid from `done` until the next `start` |
+| `sse` | out | 49 | sum of squared distances over the run |
 
-![Simulation Waveform](images/waveform.png)
-*(Vivado waveform demonstrating centroid loading, continuous streaming, and pipeline latency)*
+## Verification
 
-## 📁 Repository Structure
-```text
-├── src/                    # Verilog RTL Source Code
-│   ├── kmeans_core.v
-│   ├── distance_calc_2d.v
-│   └── min_finder_4.v
-├── sim/                    # Self-checking behavioral testbench
-│   └── tb_kmeans.v
-├── openlane/               # Physical design constraints and GDSII layout shots
-│   └── config.json         
-└── images/                 # Simulation waveforms 
+### Simulation: cocotb + Icarus Verilog (`make sim`)
+
+Every per-point result, every accumulator and the SSE are compared with a
+pure-Python model ([tb/model.py](tb/model.py)), with random gaps on the input
+stream and random back-pressure on the output.
+
+| Test | Checks |
+|---|---|
+| `test_overflow_regression` | the exact case the v1 core got wrong |
+| `test_extreme_values` | coordinates at -32768 / 32767; all centroids far from all points (distances above 2^32) |
+| `test_ties` | duplicate centroids: the lower index must win |
+| `test_random_stress` | 4 x 1500 full-range random points, 70 % input valid, 60 % output ready |
+| `test_full_rate` | 1000 points with no stalls finish in N + latency cycles (II = 1) |
+| `test_zero_points` | `num_points = 0` finishes cleanly |
+| `test_back_to_back_runs` | accumulators clear on every start |
+| `test_cfg_ignored_while_busy` | centroid writes during a run are ignored |
+| `test_lloyd_full_algorithm` | complete K-means converges and matches the software reference iteration by iteration |
+| `test_coverage_closure` | fails unless every functional-coverage bin was hit |
+
+The suite runs for K = 2, 4, 8 and 16; all coverage bins close for every K
+(18 bins for K = 4, including back-pressure, a completely full pipeline,
+ties, empty clusters and distances that overflowed in v1). Re-inserting the
+v1 32-bit truncation makes four tests fail immediately.
+
+`make -C tb TEST=pe` drives **all 131,071 possible coordinate differences**
+through one distance PE (plus 20,000 random inputs) and checks each result
+exactly.
+
+### Formal: SymbiYosys + Yices (`make formal`)
+
+| Check | Kind | Configuration | Result |
+|---|---|---|---|
+| Arg-min tree returns the minimum and the lowest index holding it | unbounded proof (k-induction) | 33-bit, K = 2, 4, 8, 16 | proven |
+| Control and handshake: stalled output holds its value; no `s_ready` or `m_valid` while idle; counters and in-flight valid bits stay consistent | unbounded proof (k-induction) | 16-bit data, 16-bit counts, K = 4 | proven |
+| Scoreboard: results never outnumber points, at most `latency` in flight, `done` only after exactly `num_points` results | bounded, 20 cycles | 16-bit data | pass |
+| End-to-end data integrity for an arbitrary point (`anyconst` token) | bounded, 16 cycles | 2-bit data, K = 4 and K = 8 | pass |
+| Cover: a full run, a stalled full pipeline, a tracked point landing in the last cluster | cover | | reached |
+
+Proving multipliers equivalent is beyond SAT solvers at 16 bits, so the
+end-to-end data property runs at a small width and the arithmetic is covered
+at full width by the exhaustive PE test. See [docs/DESIGN.md](docs/DESIGN.md).
+
+## Implementation
+
+### Resource estimate: Yosys `synth_xilinx` (Artix-7), `make synth`
+
+| K | LUTs | FFs | DSP48E1 | CARRY4 | Latency (cycles) |
+|---|---|---|---|---|---|
+| 2 | 391 | 490 | 4 | 68 | 4 |
+| 4 | 718 | 817 | 8 | 94 | 5 |
+| 8 | 1258 | 1438 | 16 | 146 | 6 |
+| 16 | 2371 | 2647 | 32 | 250 | 7 |
+
+The update-step statistics account for about 350 LUTs and 530 FFs at K = 4
+(the assignment-only datapath is 371 LUTs / 286 FFs). Vivado usually maps
+to fewer LUTs than Yosys.
+
+### Vivado and OpenLane (v1 results, to be refreshed for v2)
+
+The numbers below were measured on the v1 assignment-only core and will be
+updated after re-running the flows on v2.
+
+| Flow | Metric | v1 result |
+|---|---|---|
+| Vivado, xc7a35tcpg236-1 | Fmax | 186.74 MHz |
+| | LUTs / FFs / DSP48E1 | 379 / 489 / 8 |
+| OpenLane, Sky130 | Die area | 1000 x 1000 um |
+| | Clock target | 100 MHz |
+| | Setup / hold, DRC / LVS | 0 / 0, 0 / 0 |
+
+To run OpenLane, copy `rtl/*.sv` into the design's `src/` folder next to
+`openlane/config.json`.
+
+![Final GDSII layout (v1)](openlane/chip_layout.png)
+
+## Running it
+
+```
+make lint      # Verilator -Wall for K = 2, 4, 8, 16
+make sim       # cocotb regression for every K + exhaustive PE test
+make formal    # SymbiYosys proofs and bounded checks
+make synth     # Yosys area sweep
+make -C tb K=8 SEED=42 WAVES=1   # one configuration, chosen seed, waveforms
+```
+
+Requires Icarus Verilog 12, Verilator 5, Yosys, SymbiYosys with Yices, and
+Python 3 with `cocotb >= 2.0`. CI runs all of it on every push
+([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+## Repository layout
+
+```
+rtl/
+  kmeans_core.sv     top level: control, PEs, accumulators
+  distance_calc.sv   3-stage squared-distance PE
+  min_tree.sv        pipelined, parameterised arg-min tree
+tb/
+  test_kmeans.py     cocotb regression (+ model.py, coverage.py)
+  test_distance_calc.py   exhaustive PE test
+formal/
+  kmeans_formal.sv, kmeans.sby       core properties
+  min_tree_formal.sv, min_tree.sby   tree proof
+synth/sweep.py       Yosys area sweep
+openlane/            OpenLane configuration and v1 layout
+docs/DESIGN.md       design rationale
+```
+
+## Changes from v1
+
+* **Fixed:** squared distance truncated to 32 bits, so far centroids could
+  wrap around and win. Distances are now 33 bits and exact.
+* **Fixed:** a gap in the input stream skipped points (the address advanced
+  without a valid point). Replaced by a valid/ready stream with back-pressure.
+* **Fixed:** completion used a fixed drain delay; `done` now follows the last
+  accepted result.
+* **New:** update-step statistics (sums, counts, SSE), so the core runs whole
+  Lloyd iterations.
+* **New:** parameterised K, valid-gated stage enables, cocotb + coverage,
+  exhaustive PE test, formal proofs, area sweep, CI.
