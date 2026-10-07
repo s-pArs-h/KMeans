@@ -1,0 +1,53 @@
+# SymbiYosys flow for kmeans_core. Needs yosys, sby and the yices solver.
+#   sby -f kmeans.sby            run every task
+#
+#   prove     k-induction, unbounded: control/handshake properties at the real
+#             widths (DATA_W=16, CNT_W=16), using the invariants inside
+#             kmeans_core under `ifdef FORMAL
+#   bmc_w16   bounded (20 cycles): scoreboard properties P1-P4 at DATA_W=16
+#   bmc_data  bounded (16 cycles): all properties incl. end-to-end data
+#             integrity P5, at DATA_W=2 (multiplier equivalence is too hard
+#             for SAT at larger widths; see README)
+#   bmc_k8    bounded (16 cycles): as bmc_data with K=8
+#   cover     reachability of a full run, a full stalled pipeline, and a
+#             tracked point landing in the last cluster
+# The arg-min tree has its own unbounded full-width proof: min_tree.sby.
+
+[tasks]
+prove
+bmc_w16
+bmc_data
+bmc_k8
+cover
+
+[options]
+prove:    mode prove
+prove:    depth 4
+bmc_w16:  mode bmc
+bmc_w16:  depth 20
+bmc_data: mode bmc
+bmc_data: depth 16
+bmc_k8:   mode bmc
+bmc_k8:   depth 16
+cover:    mode cover
+cover:    depth 20
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal distance_calc.sv min_tree.sv kmeans_core.sv kmeans_formal.sv
+prove:    chparam -set DATA_W 16 -set CNT_W 16 -set CHECK_DATA 0 -set SCOREBOARD 0 kmeans_formal
+bmc_w16:  chparam -set DATA_W 16 -set CNT_W 4 -set CHECK_DATA 0 kmeans_formal
+bmc_data: chparam -set DATA_W 2 kmeans_formal
+bmc_k8:   chparam -set DATA_W 2 -set K 8 kmeans_formal
+cover:    chparam -set DATA_W 2 kmeans_formal
+prep -flatten -top kmeans_formal
+memory_map
+opt -fast
+
+[files]
+../rtl/distance_calc.sv
+../rtl/min_tree.sv
+../rtl/kmeans_core.sv
+kmeans_formal.sv
