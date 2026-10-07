@@ -1,6 +1,6 @@
 {
     "DESIGN_NAME": "kmeans_core",
-    "VERILOG_FILES": "dir::src/*.v",
+    "VERILOG_FILES": ["dir::src/distance_calc.sv", "dir::src/min_tree.sv", "dir::src/kmeans_core.sv"],
     "CLOCK_PORT": "clk",
     "CLOCK_PERIOD": 10.0,
     "FP_SIZING": "absolute",
