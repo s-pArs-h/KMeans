@@ -1,0 +1,27 @@
+# Unbounded proof (k-induction) of the arg-min tree at full 33-bit width.
+#   sby -f min_tree.sby          K = 2, 4, 8, 16
+[tasks]
+k2
+k4
+k8
+k16
+
+[options]
+mode prove
+depth 6
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal min_tree.sv min_tree_formal.sv
+k2:  chparam -set K 2 min_tree_formal
+k8:  chparam -set K 8 min_tree_formal
+k16: chparam -set K 16 min_tree_formal
+prep -flatten -top min_tree_formal
+memory_map
+opt -fast
+
+[files]
+../rtl/min_tree.sv
+min_tree_formal.sv
