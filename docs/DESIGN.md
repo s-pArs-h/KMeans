@@ -2,8 +2,7 @@
 
 This document explains *why* the core is built the way it is: the width
 arithmetic, the pipeline and flow-control choices, what the accumulators cost,
-and how it is verified. It is written so every decision can be defended in a
-design review or an interview.
+and how it is verified.
 
 ## 1. What the core computes
 
@@ -177,15 +176,3 @@ Points worth knowing:
 * The planned SoC integration adds a bus interface (memory-mapped registers
   plus DMA into the point stream) so a RISC-V core can run the whole
   algorithm.
-
-## 10. Questions to be ready for
-
-* Why 33 bits? Why are the top two bits of the product always zero?
-* What happens on a tie, and why does it matter for testing?
-* Walk through what happens when `m_ready` drops for three cycles.
-* Why is `s_ready` combinational on `m_ready`, and how would you remove that path?
-* Why no reset on the datapath registers? What would break if a valid bit had no reset?
-* What do the accumulators cost, and how would you make them cheaper?
-* How do you know your random test is good enough? (coverage, mutation)
-* What does k-induction prove that BMC does not? Why did it need invariants?
-* Why can't the solver prove the multipliers at 16 bits, and what did you do instead?
