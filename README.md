@@ -133,18 +133,23 @@ The update-step statistics account for about 350 LUTs and 530 FFs at K = 4
 (the assignment-only datapath is 371 LUTs / 286 FFs). Vivado usually maps
 to fewer LUTs than Yosys.
 
-### Vivado and OpenLane (v1 results, to be refreshed for v2)
+### Vivado and OpenLane
 
-The numbers below were measured on the v1 assignment-only core and will be
-updated after re-running the flows on v2.
+v1 is the original assignment-only core. v2 was implemented with Vivado
+2025.1 out of context (the core alone, no pins) with a 4 ns clock target;
+its maximum frequency is estimated as 1 / (period - worst slack). The
+OpenLane run has not been repeated for v2 yet.
 
-| Flow | Metric | v1 result |
-|---|---|---|
-| Vivado, xc7a35tcpg236-1 | Fmax | 186.74 MHz |
-| | LUTs / FFs / DSP48E1 | 379 / 489 / 8 |
-| OpenLane, Sky130 | Die area | 1000 x 1000 um |
-| | Clock target | 100 MHz |
-| | Setup / hold, DRC / LVS | 0 / 0, 0 / 0 |
+| Flow | Metric | v1 | v2 (K = 4) |
+|---|---|---|---|
+| Vivado, xc7a35tcpg236-1 | Fmax | 186.74 MHz | about 209 MHz |
+| | LUTs / FFs / DSP48E1 | 379 / 489 / 8 | 747 / 947 / 8 |
+| OpenLane, Sky130 | Die area | 1000 x 1000 um | |
+| | Clock target | 100 MHz | |
+| | Setup / hold, DRC / LVS | 0 / 0, 0 / 0 | |
+
+v2 adds the per-cluster sums, counts and the SSE (the extra LUTs and
+flip-flops) and still runs faster than v1.
 
 To run OpenLane, copy `rtl/*.sv` into the design's `src/` folder next to
 `openlane/config.json`.
